@@ -1,0 +1,7 @@
+google-auth==2.49.2
+gspread==6.2.1
+langgraph==1.1.6
+openai==2.31.0
+playwright==1.58.0
+python-dotenv==1.2.2
+streamlit==1.56.0
