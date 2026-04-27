@@ -9,6 +9,46 @@ def _conn():
     return sqlite3.connect(DB_PATH)
 
 
+def init_fts(conn: sqlite3.Connection):
+    """Создаёт FTS5 таблицу и триггеры если их ещё нет."""
+    table_exists = conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='reviews_fts'"
+    ).fetchone()[0]
+
+    conn.execute("""
+        CREATE VIRTUAL TABLE IF NOT EXISTS reviews_fts
+        USING fts5(id UNINDEXED, title, text, company UNINDEXED, rating UNINDEXED,
+                   content='reviews', content_rowid='rowid')
+    """)
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS reviews_fts_insert
+        AFTER INSERT ON reviews BEGIN
+            INSERT INTO reviews_fts(rowid, id, title, text, company, rating)
+            VALUES (new.rowid, new.id, new.title, new.text, new.company, new.rating);
+        END
+    """)
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS reviews_fts_delete
+        AFTER DELETE ON reviews BEGIN
+            INSERT INTO reviews_fts(reviews_fts, rowid, id, title, text, company, rating)
+            VALUES ('delete', old.rowid, old.id, old.title, old.text, old.company, old.rating);
+        END
+    """)
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS reviews_fts_update
+        AFTER UPDATE ON reviews BEGIN
+            INSERT INTO reviews_fts(reviews_fts, rowid, id, title, text, company, rating)
+            VALUES ('delete', old.rowid, old.id, old.title, old.text, old.company, old.rating);
+            INSERT INTO reviews_fts(rowid, id, title, text, company, rating)
+            VALUES (new.rowid, new.id, new.title, new.text, new.company, new.rating);
+        END
+    """)
+    # Rebuild при первом создании таблицы
+    if not table_exists:
+        conn.execute("INSERT INTO reviews_fts(reviews_fts) VALUES('rebuild')")
+    conn.commit()
+
+
 def get_reviews(company: str, min_rating: int = 1, max_rating: int = 5, limit: int = 20) -> list:
     conn = _conn()
     rows = conn.execute(
@@ -114,6 +154,50 @@ def get_stats(company: Optional[str] = None) -> Union[dict, list]:
     return result[0] if company else result
 
 
+def search_reviews(query: str, company: Optional[str] = None,
+                   limit: int = 5) -> list:
+    conn = _conn()
+    init_fts(conn)
+    if company:
+        rows = conn.execute(
+            """
+            SELECT r.id, r.company, r.rating, r.title, r.text, r.published_date,
+                   rank
+            FROM reviews_fts
+            JOIN reviews r ON reviews_fts.id = r.id
+            WHERE reviews_fts MATCH ? AND r.company = ?
+            ORDER BY rank
+            LIMIT ?
+            """,
+            (query, company, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT r.id, r.company, r.rating, r.title, r.text, r.published_date,
+                   rank
+            FROM reviews_fts
+            JOIN reviews r ON reviews_fts.id = r.id
+            WHERE reviews_fts MATCH ?
+            ORDER BY rank
+            LIMIT ?
+            """,
+            (query, limit),
+        ).fetchall()
+    conn.close()
+    return [
+        {
+            "id": r[0],
+            "company": r[1],
+            "rating": r[2],
+            "title": r[3],
+            "text": (r[4] or "")[:300],
+            "published_date": r[5],
+        }
+        for r in rows
+    ]
+
+
 def export_to_sheets(company: Optional[str] = None, data_type: str = "all",
                      min_rating: int = 1, max_rating: int = 5) -> dict:
     from sheets import export
@@ -130,6 +214,8 @@ def call_tool(name: str, args: dict):
         return get_stats(**args)
     if name == "export_to_sheets":
         return export_to_sheets(**args)
+    if name == "search_reviews":
+        return search_reviews(**args)
     raise ValueError(f"Unknown tool: {name}")
 
 
@@ -199,6 +285,31 @@ TOOL_DEFINITIONS = [
                     }
                 },
                 "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_reviews",
+            "description": "Полнотекстовый поиск по отзывам. Используй когда нужно найти отзывы по ключевым словам или теме: 'жалобы на поддержку', 'проблемы с оплатой', 'долго ждали'. Если поиск по всем компаниям — вызывай отдельно для каждой компании с limit=5.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Поисковый запрос. Можно использовать AND, OR, NOT и фразы в кавычках: 'support AND slow', '\"hidden fees\"'"
+                    },
+                    "company": {
+                        "type": "string",
+                        "description": "ID компании: immobilienscout24, rentumo, immosurf, immowelt. Всегда указывай конкретную компанию и вызывай инструмент отдельно для каждой."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Максимальное количество результатов на компанию (по умолчанию 5)"
+                    }
+                },
+                "required": ["query", "company"]
             }
         }
     },
