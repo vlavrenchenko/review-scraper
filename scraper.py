@@ -214,9 +214,14 @@ def scrape_company(browser, company: dict, args, conn: sqlite3.Connection):
             print("❌ Отзывы не найдены.")
             break
 
+        new_on_page = [r for r in page_reviews if r["id"] not in known_ids]
+        if not new_on_page:
+            print("   ✅ Все отзывы на странице уже в БД — останавливаемся.")
+            break
+
         remaining = args.reviews - len(collected)
-        collected.extend(page_reviews[:remaining])
-        print(f"✅ Скачано {len(collected)} из {args.reviews}")
+        collected.extend(new_on_page[:remaining])
+        print(f"✅ Новых скачано: {len(collected)}")
 
         if len(collected) < args.reviews:
             timeout = random_timeout()
