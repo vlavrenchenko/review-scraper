@@ -58,6 +58,40 @@ def test_agent_uses_get_reviews_tool(require_openai, db_has_data):
 
 
 @pytest.mark.e2e
+def test_agent_uses_search_reviews_tool(require_openai, db_has_data):
+    """Агент вызывает search_reviews при поисковом запросе."""
+    agent, tools = _load_agent(db_has_data)
+    called_tools = []
+
+    with patch("tools.DB_PATH", db_has_data):
+        agent.run_agent(
+            "Найди жалобы на скрытые платежи в immobilienscout24",
+            on_tool_call=lambda name, args: called_tools.append(name),
+        )
+
+    assert "search_reviews" in called_tools
+
+
+@pytest.mark.e2e
+def test_agent_search_uses_english_query(require_openai, db_has_data):
+    """Агент переводит запрос на английский перед вызовом search_reviews."""
+    agent, tools = _load_agent(db_has_data)
+    search_args = []
+
+    with patch("tools.DB_PATH", db_has_data):
+        agent.run_agent(
+            "Найди жалобы на скрытые платежи в immobilienscout24",
+            on_tool_call=lambda name, args: search_args.append(args) if name == "search_reviews" else None,
+        )
+
+    assert len(search_args) > 0
+    query = search_args[0].get("query", "").lower()
+    # Запрос должен содержать английские слова, не русские
+    russian_words = ["скрытые", "платежи", "жалобы"]
+    assert not any(w in query for w in russian_words), f"Запрос содержит русские слова: {query}"
+
+
+@pytest.mark.e2e
 def test_agent_filters_by_rating(require_openai, db_has_data):
     """Агент передаёт правильный фильтр рейтинга при запросе однозвёздочных отзывов."""
     agent, tools = _load_agent(db_has_data)
