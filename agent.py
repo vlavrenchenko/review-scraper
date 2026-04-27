@@ -2,12 +2,36 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 from openai import OpenAI
 from dotenv import load_dotenv
 from tools import TOOL_DEFINITIONS, call_tool
-from logger import get_logger
+from logger import get_logger, get_cost_logger
 
+_PRICING_PATH = Path(__file__).parent / "config" / "models_pricing.json"
+
+
+def _clean_input(text: str) -> str:
+    return text.encode("utf-8", errors="replace").decode("utf-8")
+
+
+def _load_prices() -> dict:
+    if not _PRICING_PATH.exists():
+        return {}
+    raw = json.loads(_PRICING_PATH.read_text())
+    result = {}
+    for model_id, data in raw.get("models", {}).items():
+        std = data.get("pricing", {}).get("standard", {})
+        inp = std.get("input")
+        out = std.get("output")
+        if inp is not None and out is not None:
+            result[model_id] = {"input": inp, "output": out}
+    return result
+
+
+PRICES = _load_prices()
 log = get_logger("agent")
+cost_log = get_cost_logger()
 
 SYSTEM_PROMPT = """Ты аналитик отзывов платформ аренды недвижимости в Германии.
 У тебя есть доступ к базе данных отзывов с Trustpilot для четырёх компаний:
@@ -39,6 +63,8 @@ def run_agent(question: str, model: str = "gpt-4o-mini", on_tool_call=None) -> s
     ]
 
     tool_calls_count = 0
+    total_input_tokens = 0
+    total_output_tokens = 0
 
     try:
         while True:
@@ -49,15 +75,37 @@ def run_agent(question: str, model: str = "gpt-4o-mini", on_tool_call=None) -> s
                 tool_choice="auto",
             )
 
+            if response.usage:
+                total_input_tokens += response.usage.prompt_tokens
+                total_output_tokens += response.usage.completion_tokens
+
             message = response.choices[0].message
             messages.append(message)
 
             if not message.tool_calls:
                 duration = round(time.monotonic() - started_at, 2)
+                prices = PRICES.get(model)
+                cost = round(
+                    (total_input_tokens * prices["input"] + total_output_tokens * prices["output"]) / 1_000_000, 6
+                ) if prices else None
+
                 log.info("agent_done", extra={
                     "duration_sec": duration,
                     "tool_calls_count": tool_calls_count,
                     "answer_len": len(message.content or ""),
+                    "input_tokens": total_input_tokens,
+                    "output_tokens": total_output_tokens,
+                    "cost_usd": cost,
+                })
+                cost_log.info("agent_cost", extra={
+                    "model": model,
+                    "question_preview": question[:80],
+                    "input_tokens": total_input_tokens,
+                    "output_tokens": total_output_tokens,
+                    "total_tokens": total_input_tokens + total_output_tokens,
+                    "cost_usd": cost,
+                    "duration_sec": duration,
+                    "tool_calls_count": tool_calls_count,
                 })
                 return message.content
 
@@ -96,7 +144,7 @@ def main():
     assert os.environ.get("OPENAI_API_KEY"), "Задайте OPENAI_API_KEY в .env файле"
 
     if len(sys.argv) > 1:
-        question = " ".join(sys.argv[1:])
+        question = _clean_input(" ".join(sys.argv[1:]))
         print(f"\n❓ {question}\n")
         answer = run_agent(question)
         print(f"\n💬 {answer}\n")
@@ -105,7 +153,7 @@ def main():
     print("🤖 Агент готов. Задавай вопросы про отзывы (exit для выхода)\n")
     while True:
         try:
-            question = input("❓ Вопрос: ").strip()
+            question = _clean_input(input("❓ Вопрос: ").strip())
         except (EOFError, KeyboardInterrupt):
             break
         if not question:
