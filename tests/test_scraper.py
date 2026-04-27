@@ -158,6 +158,42 @@ def test_incremental_collects_only_new(test_db):
     assert after == before + 1  # добавился только новый
 
 
+def test_all_new_mode_collects_across_pages(test_db):
+    """--all-new скачивает новые отзывы со всех страниц пока не встретит известные."""
+    import sqlite3
+    import scraper
+    from unittest.mock import MagicMock
+    reload(scraper)
+
+    with patch("scraper.DB_PATH", test_db), patch("scraper.COMPANIES_PATH"):
+        conn = sqlite3.connect(test_db)
+        before = conn.execute("SELECT COUNT(*) FROM reviews WHERE company='rentumo'").fetchone()[0]
+
+        args = MagicMock()
+        args.reviews = 100
+        args.all_new = True
+        args.no_cache = True
+        args.cache_ttl = 60
+
+        pages = {
+            1: [_make_review("new_a"), _make_review("new_b")],
+            2: [_make_review("new_c"), _make_review("new_d")],
+            3: [_make_review("r1"), _make_review("r2")],  # все известны → стоп
+        }
+
+        def fake_get_page(browser, url, company_id, page_num, no_cache, ttl):
+            return pages.get(page_num, [])
+
+        with patch("scraper.get_page", side_effect=fake_get_page), \
+             patch("scraper.random_timeout", return_value=0):
+            scraper.scrape_company(MagicMock(), {"id": "rentumo", "name": "Rentumo", "url": "http://x"}, args, conn)
+
+        after = conn.execute("SELECT COUNT(*) FROM reviews WHERE company='rentumo'").fetchone()[0]
+        conn.close()
+
+    assert after == before + 4  # new_a, new_b, new_c, new_d
+
+
 def test_save_reviews_ignores_duplicates(test_db):
     """save_reviews не дублирует уже существующие записи."""
     import scraper

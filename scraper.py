@@ -26,8 +26,12 @@ def parse_args():
              f"Доступные: {', '.join(companies.keys())}, all"
     )
     parser.add_argument(
-        "--reviews", type=int, default=50,
-        help="Количество отзывов для скачивания на компанию (по умолчанию 50)"
+        "--reviews", type=int, default=100,
+        help="Защитная граница скачивания (по умолчанию 100). Игнорируется при --all-new"
+    )
+    parser.add_argument(
+        "--all-new", action="store_true",
+        help="Скачать все новые отзывы которых нет в БД, без ограничения по количеству"
     )
     parser.add_argument(
         "--no-cache", action="store_true",
@@ -201,12 +205,15 @@ def scrape_company(browser, company: dict, args, conn: sqlite3.Connection):
     url = company["url"]
 
     known_ids = get_known_ids(conn, company_id)
-    print(f"\n🏢 {company_name}  (в базе: {len(known_ids)} отзывов, скачиваем: {args.reviews})")
+    all_new = getattr(args, "all_new", False)
+    limit = float("inf") if all_new else args.reviews
+    mode = "все новые" if all_new else f"до {args.reviews}"
+    print(f"\n🏢 {company_name}  (в базе: {len(known_ids)} отзывов, режим: {mode})")
 
     collected: list[dict] = []
     page_num = 1
 
-    while len(collected) < args.reviews:
+    while len(collected) < limit:
         print(f"📥 Страница {page_num}...")
         page_reviews = get_page(browser, url, company_id, page_num, args.no_cache, args.cache_ttl)
 
@@ -219,15 +226,14 @@ def scrape_company(browser, company: dict, args, conn: sqlite3.Connection):
             print("   ✅ Все отзывы на странице уже в БД — останавливаемся.")
             break
 
-        remaining = args.reviews - len(collected)
-        collected.extend(new_on_page[:remaining])
+        remaining = None if all_new else (int(limit) - len(collected))
+        collected.extend(new_on_page if remaining is None else new_on_page[:remaining])
         print(f"✅ Новых скачано: {len(collected)}")
 
-        if len(collected) < args.reviews:
-            timeout = random_timeout()
-            print(f"⏳ Пауза {timeout}с...\n")
-            time.sleep(timeout)
-            page_num += 1
+        timeout = random_timeout()
+        print(f"⏳ Пауза {timeout}с...\n")
+        time.sleep(timeout)
+        page_num += 1
 
     inserted, updated = save_reviews(conn, collected, company_id)
     total = conn.execute(
