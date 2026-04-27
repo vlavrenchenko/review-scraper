@@ -9,6 +9,13 @@ def _conn():
     return sqlite3.connect(DB_PATH)
 
 
+def _clean(text: str | None) -> str:
+    """Убирает суррогатные символы которые не могут быть сериализованы в UTF-8."""
+    if not text:
+        return ""
+    return text.encode("utf-8", errors="replace").decode("utf-8")
+
+
 def init_fts(conn: sqlite3.Connection):
     """Создаёт FTS5 таблицу и триггеры если их ещё нет."""
     table_exists = conn.execute(
@@ -66,8 +73,8 @@ def get_reviews(company: str, min_rating: int = 1, max_rating: int = 5, limit: i
         {
             "id": r[0],
             "rating": r[1],
-            "title": r[2],
-            "text": (r[3] or "")[:200],
+            "title": _clean(r[2]),
+            "text": _clean(r[3])[:200],
             "has_reply": r[4] is not None,
             "published_date": r[5],
         }
@@ -154,47 +161,112 @@ def get_stats(company: Optional[str] = None) -> Union[dict, list]:
     return result[0] if company else result
 
 
-def search_reviews(query: str, company: Optional[str] = None,
-                   limit: int = 5) -> list:
+def _fts_search(query: str, company: Optional[str], limit: int) -> list[str]:
+    """Возвращает список id отзывов по FTS5, отсортированных по релевантности."""
     conn = _conn()
     init_fts(conn)
-    if company:
-        rows = conn.execute(
-            """
-            SELECT r.id, r.company, r.rating, r.title, r.text, r.published_date,
-                   rank
-            FROM reviews_fts
-            JOIN reviews r ON reviews_fts.id = r.id
-            WHERE reviews_fts MATCH ? AND r.company = ?
-            ORDER BY rank
-            LIMIT ?
-            """,
-            (query, company, limit),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            """
-            SELECT r.id, r.company, r.rating, r.title, r.text, r.published_date,
-                   rank
-            FROM reviews_fts
-            JOIN reviews r ON reviews_fts.id = r.id
-            WHERE reviews_fts MATCH ?
-            ORDER BY rank
-            LIMIT ?
-            """,
-            (query, limit),
-        ).fetchall()
+    try:
+        if company:
+            rows = conn.execute(
+                """
+                SELECT reviews_fts.id FROM reviews_fts
+                JOIN reviews r ON reviews_fts.id = r.id
+                WHERE reviews_fts MATCH ? AND r.company = ?
+                ORDER BY rank LIMIT ?
+                """,
+                (query, company, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT reviews_fts.id FROM reviews_fts
+                WHERE reviews_fts MATCH ?
+                ORDER BY rank LIMIT ?
+                """,
+                (query, limit),
+            ).fetchall()
+    except Exception:
+        rows = []
+    finally:
+        conn.close()
+    return [r[0] for r in rows]
+
+
+def _semantic_search(query: str, company: Optional[str], limit: int) -> list[str]:
+    """Возвращает список id отзывов по семантическому поиску через ChromaDB."""
+    try:
+        import chromadb
+        from openai import OpenAI
+        from pathlib import Path as _Path
+
+        chroma_path = _Path(__file__).parent / "data" / "chroma"
+        if not chroma_path.exists():
+            return []
+
+        client_chroma = chromadb.PersistentClient(path=str(chroma_path))
+        collection = client_chroma.get_or_create_collection(
+            name="reviews", metadata={"hnsw:space": "cosine"}
+        )
+        if collection.count() == 0:
+            return []
+
+        client_oai = OpenAI()
+        response = client_oai.embeddings.create(
+            model="text-embedding-3-small", input=query
+        )
+        embedding = response.data[0].embedding
+
+        where = {"company": {"$eq": company}} if company else None
+        results = collection.query(
+            query_embeddings=[embedding],
+            n_results=min(limit, collection.count()),
+            where=where,
+            include=[],
+        )
+        return results["ids"][0] if results["ids"] else []
+    except Exception:
+        return []
+
+
+def _rrf(fts_ids: list[str], semantic_ids: list[str], k: int = 60) -> list[str]:
+    """Reciprocal Rank Fusion: объединяет два ранжированных списка."""
+    scores: dict[str, float] = {}
+    for rank, doc_id in enumerate(fts_ids):
+        scores[doc_id] = scores.get(doc_id, 0) + 1 / (k + rank + 1)
+    for rank, doc_id in enumerate(semantic_ids):
+        scores[doc_id] = scores.get(doc_id, 0) + 1 / (k + rank + 1)
+    return sorted(scores, key=lambda x: scores[x], reverse=True)
+
+
+def search_reviews(query: str, company: Optional[str] = None,
+                   limit: int = 5) -> list:
+    fts_ids = _fts_search(query, company, limit * 2)
+    semantic_ids = _semantic_search(query, company, limit * 2)
+    merged_ids = _rrf(fts_ids, semantic_ids)[:limit]
+
+    if not merged_ids:
+        return []
+
+    conn = _conn()
+    placeholders = ",".join("?" * len(merged_ids))
+    rows = conn.execute(
+        f"SELECT id, company, rating, title, text, published_date FROM reviews WHERE id IN ({placeholders})",
+        merged_ids,
+    ).fetchall()
     conn.close()
+
+    by_id = {r[0]: r for r in rows}
     return [
         {
-            "id": r[0],
-            "company": r[1],
-            "rating": r[2],
-            "title": r[3],
-            "text": (r[4] or "")[:300],
-            "published_date": r[5],
+            "id": doc_id,
+            "company": by_id[doc_id][1],
+            "rating": by_id[doc_id][2],
+            "title": _clean(by_id[doc_id][3]),
+            "text": _clean(by_id[doc_id][4])[:300],
+            "published_date": by_id[doc_id][5],
         }
-        for r in rows
+        for doc_id in merged_ids
+        if doc_id in by_id
     ]
 
 

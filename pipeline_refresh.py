@@ -43,6 +43,10 @@ def parse_args():
         "--skip-analyze", action="store_true",
         help="Только скачать отзывы, пропустить анализ"
     )
+    parser.add_argument(
+        "--skip-embed", action="store_true",
+        help="Пропустить генерацию эмбеддингов"
+    )
     return parser.parse_args()
 
 
@@ -135,6 +139,15 @@ def main():
     else:
         print("\n⏭️  Анализ пропущен (--skip-analyze)\n")
 
+    # Шаг 3 — эмбеддинги
+    embed_count = 0
+    if not args.skip_embed:
+        print("\n🧮 ШАГ 3: Генерируем эмбеддинги для поиска...\n")
+        from embed import run as embed_run
+        embed_count = embed_run()
+    else:
+        print("\n⏭️  Эмбеддинги пропущены (--skip-embed)\n")
+
     conn.close()
     elapsed = round(time.monotonic() - t0, 1)
 
@@ -150,10 +163,13 @@ def main():
         print(f"  {company['name']}: новых отзывов: {new}{analyze_str}")
     print(f"{'='*55}")
     print(f"  Всего новых отзывов: {total_new}")
+    if not args.skip_embed:
+        print(f"  Новых эмбеддингов:   {embed_count}")
 
     log.info("refresh_done", extra={
         "duration_sec": elapsed,
         "total_new_reviews": total_new,
+        "embed_count": embed_count,
         "scrape_results": scrape_results,
         "analyze_results": analyze_results,
     })

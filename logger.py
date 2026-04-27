@@ -32,6 +32,28 @@ class _JsonFormatter(logging.Formatter):
         return json.dumps(data, ensure_ascii=False, default=str)
 
 
+def get_cost_logger() -> logging.Logger:
+    """Отдельный логгер для учёта расходов на API — пишет в logs/costs.log."""
+    logger = logging.getLogger("costs")
+    if logger.handlers:
+        return logger
+
+    logger.setLevel(logging.INFO)
+
+    file_handler = TimedRotatingFileHandler(
+        filename=LOGS_DIR / "costs.log",
+        when="midnight",
+        backupCount=365,
+        encoding="utf-8",
+    )
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(_JsonFormatter())
+
+    logger.addHandler(file_handler)
+    logger.propagate = False
+    return logger
+
+
 def get_logger(name: str) -> logging.Logger:
     logger = logging.getLogger(name)
 
