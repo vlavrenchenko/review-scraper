@@ -79,6 +79,85 @@ def test_save_reviews_inserts_new(test_db):
     assert after == before + 1
 
 
+def _make_review(rid, rating=5):
+    return {
+        "id": rid,
+        "title": "Title",
+        "text": "Text",
+        "rating": rating,
+        "dates": {"publishedDate": "2026-01-01T00:00:00.000Z"},
+        "consumer": {"displayName": "User"},
+        "reply": None,
+    }
+
+
+def test_incremental_stops_when_all_known(test_db):
+    """scrape_company останавливается если все отзывы страницы уже в БД."""
+    import sqlite3
+    import scraper
+    from unittest.mock import MagicMock
+    reload(scraper)
+
+    with patch("scraper.DB_PATH", test_db), patch("scraper.COMPANIES_PATH"):
+        conn = sqlite3.connect(test_db)
+
+        # Страница содержит только уже известные ID (r1, r2, r3 — из conftest)
+        page_all_known = [_make_review("r1"), _make_review("r2"), _make_review("r3")]
+
+        args = MagicMock()
+        args.reviews = 50
+        args.no_cache = True
+        args.cache_ttl = 60
+
+        pages_fetched = []
+
+        def fake_get_page(browser, url, company_id, page_num, no_cache, ttl):
+            pages_fetched.append(page_num)
+            return page_all_known
+
+        with patch("scraper.get_page", side_effect=fake_get_page), \
+             patch("scraper.random_timeout", return_value=0):
+            scraper.scrape_company(MagicMock(), {"id": "rentumo", "name": "Rentumo", "url": "http://x"}, args, conn)
+
+        conn.close()
+
+    assert len(pages_fetched) == 1  # остановился после первой страницы
+
+
+def test_incremental_collects_only_new(test_db):
+    """scrape_company сохраняет только новые отзывы, пропускает дубли."""
+    import sqlite3
+    import scraper
+    from unittest.mock import MagicMock
+    reload(scraper)
+
+    with patch("scraper.DB_PATH", test_db), patch("scraper.COMPANIES_PATH"):
+        conn = sqlite3.connect(test_db)
+        before = conn.execute("SELECT COUNT(*) FROM reviews WHERE company='rentumo'").fetchone()[0]
+
+        # Страница содержит 1 известный и 1 новый отзыв
+        mixed_page = [_make_review("r1"), _make_review("new_review_x")]
+
+        args = MagicMock()
+        args.reviews = 50
+        args.no_cache = True
+        args.cache_ttl = 60
+
+        def fake_get_page(browser, url, company_id, page_num, no_cache, ttl):
+            if page_num == 1:
+                return mixed_page
+            return []
+
+        with patch("scraper.get_page", side_effect=fake_get_page), \
+             patch("scraper.random_timeout", return_value=0):
+            scraper.scrape_company(MagicMock(), {"id": "rentumo", "name": "Rentumo", "url": "http://x"}, args, conn)
+
+        after = conn.execute("SELECT COUNT(*) FROM reviews WHERE company='rentumo'").fetchone()[0]
+        conn.close()
+
+    assert after == before + 1  # добавился только новый
+
+
 def test_save_reviews_ignores_duplicates(test_db):
     """save_reviews не дублирует уже существующие записи."""
     import scraper
