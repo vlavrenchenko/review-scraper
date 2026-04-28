@@ -115,51 +115,82 @@ tab_agent, tab_report = st.tabs(["💬 Агент", "📄 Отчёт"])
 # =========================================================
 
 with tab_agent:
-    st.header("Вопрос к агенту")
     st.caption("Агент сам выбирает нужные инструменты и запрашивает данные из БД")
 
-    # Быстрые вопросы
-    st.write("Быстрые вопросы:")
-    cols = st.columns(len(QUICK_QUESTIONS))
-    for col, q in zip(cols, QUICK_QUESTIONS):
-        if col.button(q, use_container_width=True, key=f"quick_{q}"):
-            st.session_state["agent_question_text"] = q
+    # Инициализация состояния
+    if "chat_history" not in st.session_state:
+        st.session_state["chat_history"] = []   # история для агента
+    if "chat_messages" not in st.session_state:
+        st.session_state["chat_messages"] = []  # сообщения для отображения
 
-    question = st.text_area(
-        "Или введи свой вопрос:",
-        value=st.session_state.get("agent_question_text", ""),
-        height=80,
-        placeholder="Например: сколько негативных отзывов у Immowelt за 2025 год?",
-    )
+    # Кнопки быстрых вопросов — показываем только при пустом чате
+    if not st.session_state["chat_messages"]:
+        st.write("Быстрые вопросы:")
+        cols = st.columns(len(QUICK_QUESTIONS))
+        for col, q in zip(cols, QUICK_QUESTIONS):
+            if col.button(q, use_container_width=True, key=f"quick_{q}"):
+                st.session_state["pending_question"] = q
+                st.rerun()
 
-    if st.button("Задать вопрос ➤", type="primary"):
-        if not question.strip():
-            st.warning("Введи вопрос перед отправкой")
-        else:
-            tool_calls_log = []
+    # Кнопка сброса диалога
+    col_new, _ = st.columns([1, 5])
+    if col_new.button("🔄 Новый диалог", disabled=not st.session_state["chat_messages"]):
+        st.session_state["chat_history"] = []
+        st.session_state["chat_messages"] = []
+        st.rerun()
 
-            def on_tool_call(name, args):
-                tool_calls_log.append((name, args))
+    # Показываем историю чата
+    for msg in st.session_state["chat_messages"]:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            if msg["role"] == "assistant" and msg.get("tool_calls"):
+                calls = msg["tool_calls"]
+                with st.expander(f"🔧 Вызовы инструментов ({len(calls)})", expanded=False):
+                    for name, args in calls:
+                        st.code(f"{name}({json.dumps(args, ensure_ascii=False)})", language="python")
 
-            with st.spinner("Агент думает..."):
-                try:
-                    answer = run_agent(question.strip(), on_tool_call=on_tool_call)
-                    st.session_state["agent_answer"] = answer
-                    st.session_state["agent_tool_calls"] = tool_calls_log
-                except Exception as e:
-                    st.error(f"Ошибка: {e}")
-                    st.session_state.pop("agent_answer", None)
+    # Обработка pending вопроса от быстрых кнопок
+    if "pending_question" in st.session_state:
+        question = st.session_state.pop("pending_question")
+        st.session_state["chat_messages"].append({"role": "user", "content": question})
+        tool_calls_log = []
+        with st.spinner("Агент думает..."):
+            try:
+                answer, new_history = run_agent(
+                    question,
+                    history=st.session_state["chat_history"],
+                    on_tool_call=lambda n, a: tool_calls_log.append((n, a)),
+                )
+                st.session_state["chat_history"] = new_history
+                st.session_state["chat_messages"].append({
+                    "role": "assistant",
+                    "content": answer,
+                    "tool_calls": tool_calls_log,
+                })
+            except Exception as e:
+                st.error(f"Ошибка: {e}")
+        st.rerun()
 
-    if "agent_answer" in st.session_state:
-        if st.session_state.get("agent_tool_calls"):
-            calls = st.session_state["agent_tool_calls"]
-            with st.expander(f"🔧 Вызовы инструментов ({len(calls)})", expanded=False):
-                for name, args in calls:
-                    args_str = json.dumps(args, ensure_ascii=False)
-                    st.code(f"{name}({args_str})", language="python")
-
-        st.markdown("**Ответ агента:**")
-        st.markdown(st.session_state["agent_answer"])
+    # Поле ввода
+    if question := st.chat_input("Задай вопрос про отзывы..."):
+        st.session_state["chat_messages"].append({"role": "user", "content": question})
+        tool_calls_log = []
+        with st.spinner("Агент думает..."):
+            try:
+                answer, new_history = run_agent(
+                    question,
+                    history=st.session_state["chat_history"],
+                    on_tool_call=lambda n, a: tool_calls_log.append((n, a)),
+                )
+                st.session_state["chat_history"] = new_history
+                st.session_state["chat_messages"].append({
+                    "role": "assistant",
+                    "content": answer,
+                    "tool_calls": tool_calls_log,
+                })
+            except Exception as e:
+                st.error(f"Ошибка: {e}")
+        st.rerun()
 
 
 # =========================================================

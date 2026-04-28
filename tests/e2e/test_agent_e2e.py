@@ -21,10 +21,11 @@ def test_agent_answers_stats_question(require_openai, db_has_data):
     """Агент отвечает на вопрос о статистике и возвращает непустой ответ."""
     agent, tools = _load_agent(db_has_data)
     with patch("tools.DB_PATH", db_has_data):
-        answer = agent.run_agent("Сколько всего отзывов в базе?")
+        answer, history = agent.run_agent("Сколько всего отзывов в базе?")
 
     assert isinstance(answer, str)
     assert len(answer) > 20
+    assert isinstance(history, list)
 
 
 @pytest.mark.e2e
@@ -105,3 +106,19 @@ def test_agent_filters_by_rating(require_openai, db_has_data):
 
     assert len(called_args) > 0
     assert called_args[0].get("max_rating", 5) <= 2
+
+
+@pytest.mark.e2e
+def test_agent_dialog_context(require_openai, db_has_data):
+    """Агент помнит контекст предыдущего вопроса в диалоге."""
+    agent, tools = _load_agent(db_has_data)
+
+    with patch("tools.DB_PATH", db_has_data):
+        answer1, history = agent.run_agent("Сколько отзывов у immobilienscout24?")
+        assert len(history) > 0
+
+        answer2, history2 = agent.run_agent("А у rentumo?", history=history)
+
+    assert isinstance(answer2, str)
+    assert len(answer2) > 10
+    assert len(history2) > len(history)

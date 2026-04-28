@@ -20,6 +20,7 @@ def make_openai_response(tool_name=None, tool_args=None, content=None, tool_call
 
     response = MagicMock()
     response.choices[0].message = message
+    response.usage = None
     return response
 
 
@@ -51,10 +52,11 @@ def test_agent_calls_get_stats_for_count_question(test_db):
     with patch("agent.OpenAI", return_value=mock_client), \
          patch("agent.call_tool", side_effect=mock_call_tool), \
          patch("tools.DB_PATH", test_db):
-        answer = agent.run_agent("Сколько отзывов у Rentumo?")
+        answer, history = agent.run_agent("Сколько отзывов у Rentumo?")
 
     assert "get_stats" in called_tools
     assert answer == "У Rentumo 3 отзыва."
+    assert len(history) > 0
 
 
 def test_agent_calls_get_reviews_for_rating_filter(test_db):
@@ -97,17 +99,15 @@ def test_agent_returns_final_answer(test_db):
     import agent
     reload(agent)
 
-    responses = [
-        make_openai_response(content="Финальный ответ агента."),
-    ]
-
+    responses = [make_openai_response(content="Финальный ответ агента.")]
     mock_client = MagicMock()
     mock_client.chat.completions.create.side_effect = responses
 
     with patch("agent.OpenAI", return_value=mock_client):
-        answer = agent.run_agent("Привет")
+        answer, history = agent.run_agent("Привет")
 
     assert answer == "Финальный ответ агента."
+    assert isinstance(history, list)
 
 
 def test_agent_handles_multiple_tool_calls(test_db):
@@ -135,7 +135,73 @@ def test_agent_handles_multiple_tool_calls(test_db):
 
     with patch("agent.OpenAI", return_value=mock_client), \
          patch("agent.call_tool", side_effect=mock_call_tool):
-        answer = agent.run_agent("Сравни Rentumo и ImmobilienScout24")
+        answer, _ = agent.run_agent("Сравни Rentumo и ImmobilienScout24")
 
     assert called_tools.count("get_stats") == 2
     assert answer == "Сравнение компаний готово."
+
+
+def test_agent_history_passed_to_messages(test_db):
+    """История передаётся в messages при следующем вызове."""
+    import agent
+    reload(agent)
+
+    captured_messages = []
+
+    def fake_create(**kwargs):
+        captured_messages.extend(kwargs.get("messages", []))
+        return make_openai_response(content="Ответ с историей.")
+
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.side_effect = fake_create
+
+    history = [
+        {"role": "user", "content": "Первый вопрос"},
+        {"role": "assistant", "content": "Первый ответ"},
+    ]
+
+    with patch("agent.OpenAI", return_value=mock_client):
+        agent.run_agent("Второй вопрос", history=history)
+
+    roles = [m["role"] if isinstance(m, dict) else m.role for m in captured_messages]
+    assert "system" in roles
+    assert roles.count("user") >= 2
+
+
+def test_agent_history_trimmed_to_max(test_db):
+    """История обрезается до MAX_HISTORY сообщений."""
+    import agent
+    reload(agent)
+
+    long_history = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"msg {i}"}
+        for i in range(20)
+    ]
+    trimmed = agent._trim_history(long_history)
+    assert len(trimmed) == agent.MAX_HISTORY
+
+
+def test_agent_history_short_not_trimmed():
+    """Короткая история не обрезается."""
+    import agent
+    reload(agent)
+
+    short_history = [{"role": "user", "content": "msg"}] * 3
+    assert agent._trim_history(short_history) == short_history
+
+
+def test_agent_returns_updated_history(test_db):
+    """run_agent возвращает обновлённую историю включая новый вопрос и ответ."""
+    import agent
+    reload(agent)
+
+    responses = [make_openai_response(content="Ответ агента.")]
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.side_effect = responses
+
+    with patch("agent.OpenAI", return_value=mock_client):
+        _, history = agent.run_agent("Мой вопрос")
+
+    contents = [m["content"] if isinstance(m, dict) else m.content for m in history]
+    assert "Мой вопрос" in contents
+    assert "Ответ агента." in contents
