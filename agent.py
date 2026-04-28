@@ -50,15 +50,29 @@ SYSTEM_PROMPT = """Ты аналитик отзывов платформ аре�
 - Если пользователь не указал компанию — вызывай search_reviews отдельно для каждой из четырёх компаний."""
 
 
-def run_agent(question: str, model: str = "gpt-4o-mini", on_tool_call=None) -> str:
+MAX_HISTORY = 10
+
+
+def _trim_history(history: list) -> list:
+    """Обрезает историю до последних MAX_HISTORY сообщений."""
+    if len(history) <= MAX_HISTORY:
+        return history
+    return history[-MAX_HISTORY:]
+
+
+def run_agent(question: str, model: str = "gpt-4o-mini",
+              history: list | None = None,
+              on_tool_call=None) -> tuple[str, list]:
     load_dotenv(override=True)
     client = OpenAI()
 
     log.info("agent_start", extra={"question": question, "model": model})
     started_at = time.monotonic()
 
+    trimmed_history = _trim_history(history or [])
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
+        *trimmed_history,
         {"role": "user", "content": question},
     ]
 
@@ -107,7 +121,8 @@ def run_agent(question: str, model: str = "gpt-4o-mini", on_tool_call=None) -> s
                     "duration_sec": duration,
                     "tool_calls_count": tool_calls_count,
                 })
-                return message.content
+                new_history = messages[1:]  # срезаем system prompt
+                return message.content or "", new_history
 
             for tool_call in message.tool_calls:
                 name = tool_call.function.name
@@ -146,11 +161,12 @@ def main():
     if len(sys.argv) > 1:
         question = _clean_input(" ".join(sys.argv[1:]))
         print(f"\n❓ {question}\n")
-        answer = run_agent(question)
+        answer, _ = run_agent(question)
         print(f"\n💬 {answer}\n")
         return
 
-    print("🤖 Агент готов. Задавай вопросы про отзывы (exit для выхода)\n")
+    print("🤖 Агент готов. Задавай вопросы про отзывы (exit для выхода, /new для нового диалога)\n")
+    history: list = []
     while True:
         try:
             question = _clean_input(input("❓ Вопрос: ").strip())
@@ -160,7 +176,11 @@ def main():
             continue
         if question.lower() in ("exit", "quit", "выход", "q"):
             break
-        answer = run_agent(question)
+        if question.lower() in ("/new", "/reset"):
+            history = []
+            print("🔄 Диалог сброшен\n")
+            continue
+        answer, history = run_agent(question, history=history)
         print(f"\n💬 {answer}\n")
 
 
